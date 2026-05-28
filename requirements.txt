@@ -1,6 +1,6 @@
 pandas==2.2.0
 numpy==1.26.4
-yfinance==0.2.40
+yfinance==1.4.0
 edgartools==2.32.0
 beautifulsoup4==4.12.3
 requests==2.31.0
