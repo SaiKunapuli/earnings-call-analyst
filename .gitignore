@@ -1,0 +1,29 @@
+# Virtual environments
+venv/
+.venv/
+
+# Data files (too large for git)
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets / API keys
+.env
+
+# Databases
+*.sqlite
+*.db
+
+# IDE / tooling
+.qodo/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
