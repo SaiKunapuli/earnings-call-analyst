@@ -24,6 +24,10 @@ __pycache__/
 .qodo/
 .vscode/
 
+# Test scripts
+smoke_test_*.py
+stress_test_*.py
+
 # OS files
 .DS_Store
 Thumbs.db
