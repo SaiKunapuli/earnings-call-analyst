@@ -7,6 +7,7 @@ without requiring a running notebook kernel, SQLite database, or GPU.
 import re
 import html as html_mod
 import numpy as np
+import pandas as pd
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from nltk.tokenize import sent_tokenize
 import pysentiment2 as ps2
@@ -126,10 +127,6 @@ _RAW_BOILERPLATE_REMOVALS: list[tuple[str, str]] = [
     (r"Operator\s*:?\s*[A-Z][a-z]+\s+(name\s+is|here|will|would|now|today|welcome|thank)[^.?!]*[.?!]\s*", " "),
     # "I would now like to turn the (call|conference) over to..."
     (r"I\s+(would|will|want|'d)\s+(now\s+)?like\s+to\s+(turn|hand)\s+(the\s+)?(call|conference)\s+over\s+to[^.?!]*[.?!]\s*", " "),
-
-    # -- Ticker + percentage noise ------------------------------------------
-    # "Apple ( AAPL 6.41% )" / "Microsoft ( MSFT 2.23% )"
-    (r"\(\s*[A-Z]{1,5}\s+[\d.]+%\s*\)", " "),
 
     # -- Q&A transition section headers -------------------------------------
     # "Question-and-Answer Session"
@@ -450,6 +447,222 @@ def compute_readability(text: str) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Transcript section splitting (Prepared Remarks vs Q&A)
+# ---------------------------------------------------------------------------
+
+# Regex to match Q&A section boundaries in earnings call transcripts.
+# Captures variations like "Questions & Answers:", "Questions and Answers:",
+# and "Question-and-Answer Session".
+#
+# Note: this requires a colon after "Answers" (or "Session"), so the
+# Motley Fool "Contents:" metadata line (which says "Questions and Answers"
+# *without* a colon) will NOT match — no false positives.
+_QA_BOUNDARY_RE = re.compile(
+    r"(?i)\bQuestions\s*(?:and|&)\s*Answers\s*:"
+    r"|\bQuestion-and-Answer\s+Session"
+)
+
+
+def split_transcript_sections(raw_text: str) -> dict[str, str]:
+    """Split a raw transcript into prepared-remarks and Q&A sections.
+
+    Earnings call transcripts from sources like Motley Fool contain two
+    distinct sections: the scripted *prepared remarks* (read by executives)
+    and the unscripted *Q&A* (analyst questions + management answers).
+    The Q&A section is where genuine sentiment signals tend to leak.
+
+    If no Q&A boundary is found (e.g. a plain SEC 8-K press release),
+    the entire text is returned under the ``"full"`` key.
+
+    Parameters
+    ----------
+    raw_text : str
+        Raw transcript text, *before* any boilerplate cleaning.
+
+    Returns
+    -------
+    dict
+        * If Q&A detected: ``{"prepared_remarks": …, "qa": …}``
+        * If no Q&A detected: ``{"full": …}``
+        * If *raw_text* is empty: ``{"full": ""}``
+    """
+    if not raw_text or not raw_text.strip():
+        return {"full": ""}
+
+    # ------------------------------------------------------------------
+    # 1.  Search for the first real Q&A section boundary.
+    #     The regex requires a colon, so the "Contents:" metadata line
+    #     (which says "Questions and Answers" without a colon) won't
+    #     trigger a false positive.
+    # ------------------------------------------------------------------
+    match = _QA_BOUNDARY_RE.search(raw_text)
+    if match is None:
+        return {"full": raw_text}
+
+    marker = match.group(0)
+    parts = raw_text.split(marker, 1)
+    if len(parts) < 2:
+        return {"full": raw_text}
+
+    prepared = parts[0].strip()
+    qa = parts[1].strip()
+
+    # ------------------------------------------------------------------
+    # 2.  Validate that the Q&A section has substantial content.
+    #     If it's only a few words, treat as a false positive.
+    # ------------------------------------------------------------------
+    if len(qa) < 250:
+        return {"full": raw_text}
+
+    return {"prepared_remarks": prepared, "qa": qa}
+
+
+def clean_and_split_transcript(raw_text: str) -> dict[str, str]:
+    """Split a raw transcript into sections, then clean each independently.
+
+    This is the recommended entry point for sentiment pipelines that
+    want per-section features.  It combines :func:`split_transcript_sections`
+    and :func:`clean_transcript`.
+
+    Parameters
+    ----------
+    raw_text : str
+        Raw transcript text.
+
+    Returns
+    -------
+    dict
+        Same keys as :func:`split_transcript_sections`, but every value
+        has been run through :func:`clean_transcript`.
+    """
+    sections = split_transcript_sections(raw_text)
+    return {key: clean_transcript(text) for key, text in sections.items()}
+
+
+# ---------------------------------------------------------------------------
+# Sector mapping for the expanded ticker universe
+# ---------------------------------------------------------------------------
+
+SECTOR_MAP: dict[str, str] = {
+    # Technology
+    "MSFT": "Technology", "GOOGL": "Technology", "META": "Technology",
+    "AMZN": "Technology", "NVDA": "Technology", "AMD": "Technology",
+    "INTC": "Technology", "CRM": "Technology", "ORCL": "Technology",
+    "ADBE": "Technology", "CSCO": "Technology", "IBM": "Technology",
+    "NOW": "Technology", "NFLX": "Technology", "DOCU": "Technology",
+    "TWLO": "Technology", "PINS": "Technology", "SNAP": "Technology",
+    "NET": "Technology", "DDOG": "Technology", "SQ": "Technology",
+    "ROKU": "Technology", "CRWD": "Technology", "ZM": "Technology",
+    "TEAM": "Technology",
+    # Financials
+    "JPM": "Financials", "BAC": "Financials", "GS": "Financials",
+    "COF": "Financials",
+    # Healthcare
+    "JNJ": "Healthcare", "UNH": "Healthcare", "PFE": "Healthcare",
+    "ABT": "Healthcare",
+    # Consumer Cyclical
+    "HD": "Consumer_Cyclical", "SBUX": "Consumer_Cyclical",
+    "NKE": "Consumer_Cyclical", "UBER": "Consumer_Cyclical",
+    "DASH": "Consumer_Cyclical", "DIS": "Consumer_Cyclical",
+    # Consumer Defensive
+    "WMT": "Consumer_Defensive", "COST": "Consumer_Defensive",
+    "PG": "Consumer_Defensive", "KO": "Consumer_Defensive",
+    # Industrials
+    "CAT": "Industrials", "BA": "Industrials", "GE": "Industrials",
+    "DE": "Industrials", "DAL": "Industrials",
+    # Energy
+    "XOM": "Energy", "CVX": "Energy", "DVN": "Energy",
+    # Materials
+    "FCX": "Materials", "NEM": "Materials",
+    # Real Estate
+    "PLD": "Real_Estate", "SPG": "Real_Estate",
+    # Utilities
+    "NEE": "Utilities", "DUK": "Utilities",
+    # Communication Services
+    "VZ": "Communication_Services",
+}
+
+
+def add_sector_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a 'sector' column to *df* based on ticker.
+
+    Tickers not found in :data:`SECTOR_MAP` are labelled ``"Other"``.
+    """
+    df = df.copy()
+    df["sector"] = df["ticker"].map(SECTOR_MAP).fillna("Other")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Cross-sectional normalization (z-scores by ticker)
+# ---------------------------------------------------------------------------
+
+SENTIMENT_Z_COLS: list[str] = [
+    # VADER
+    "vader_compound", "vader_mean", "vader_std", "vader_pct_neg",
+    "vader_pct_pos", "vader_pos", "vader_neg", "vader_neu",
+    # LM
+    "lm_net", "lm_pos_ratio", "lm_neg_ratio",
+    "lm_positive", "lm_negative", "lm_uncertainty",
+    # FinBERT
+    "finbert_net", "finbert_positive", "finbert_negative",
+    "finbert_neutral",
+    # Readability
+    "flesch_reading_ease", "flesch_kincaid_grade", "gunning_fog",
+    "smog_index", "automated_readability", "dale_chall_score",
+    "unique_word_ratio", "avg_sentence_length",
+]
+
+
+def compute_ticker_z_scores(
+    df: pd.DataFrame,
+    prefix: str = "full",
+    min_obs: int = 3,
+) -> pd.DataFrame:
+    """Compute within-ticker z-scores for key sentiment features.
+
+    Cross-sectional normalization makes sentiment scores comparable across
+    tickers.  A VADER compound of 0.3 might be "very positive" for one
+    company's earnings calls (where the mean is 0.5) but "neutral" for a more
+    effusive CEO (where the mean is 0.7).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must have a ``"ticker"`` column and the columns ``f"{prefix}_{col}"``
+        for each *col* in :data:`SENTIMENT_Z_COLS`.
+    prefix : str
+        Section prefix (e.g. ``"full"``, ``"qa"``).
+    min_obs : int
+        Minimum observations per ticker to compute z-scores.  Tickers with
+        fewer observations get NaN z-scores.
+
+    Returns
+    -------
+    pd.DataFrame
+        New columns ``f"{prefix}_{col}_z"`` are added.
+    """
+    df = df.copy()
+    for col in SENTIMENT_Z_COLS:
+        src = f"{prefix}_{col}"
+        dst = f"{prefix}_{col}_z"
+        if src not in df.columns:
+            continue
+
+        def _z_score(group: pd.Series) -> pd.Series:
+            if len(group) < min_obs:
+                return pd.Series([np.nan] * len(group), index=group.index)
+            mu = group.mean()
+            sigma = group.std()
+            if sigma < 1e-12:
+                return pd.Series([np.nan] * len(group), index=group.index)
+            return (group - mu) / sigma
+
+        df[dst] = df.groupby("ticker")[src].transform(_z_score)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Convenience: all sentiment features in one call
 # ---------------------------------------------------------------------------
 
@@ -457,14 +670,31 @@ def compute_all_sentiment_features(
     text: str,
     vader: SentimentIntensityAnalyzer | None = None,
     lm: ps2.LM | None = None,
+    prefix: str = "",
 ) -> dict:
     """Compute VADER + LM + linguistic + readability features for *text*.
 
-    Returns a flat dict suitable for building a pandas DataFrame row.
+    Parameters
+    ----------
+    text : str
+        Input (cleaned) transcript text.
+    vader : SentimentIntensityAnalyzer, optional
+    lm : pysentiment2.LM, optional
+    prefix : str
+        If provided, all feature keys are prefixed with this string
+        followed by an underscore.  Useful when computing features
+        per transcript section (e.g. ``"prepared_remarks"``, ``"qa"``).
+
+    Returns
+    -------
+    dict
+        Flat dict suitable for building a pandas DataFrame row.
     """
     features: dict = {}
     features.update(compute_paragraph_vader(text, vader))
     features.update(compute_lm_sentiment(text, lm))
     features.update(compute_linguistic_features(text))
     features.update(compute_readability(text))
+    if prefix:
+        return {f"{prefix}_{k}": v for k, v in features.items()}
     return features

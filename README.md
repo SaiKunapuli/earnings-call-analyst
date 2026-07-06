@@ -1,39 +1,47 @@
 # Earnings Call Analyst
 
-A quantitative pipeline that scrapes SEC EDGAR 8-K earnings call transcripts,
-computes NLP sentiment scores (VADER, Loughran-McDonald, FinBERT),
-and models the relationship between earnings-call language and
-subsequent abnormal stock returns using LightGBM + SHAP.
+A quantitative pipeline that ingests 33k+ real earnings-call transcripts
+(HuggingFace, speaker-segmented; SEC EDGAR 8-K scraping kept as a legacy
+fallback), computes NLP sentiment scores (VADER, Loughran-McDonald, FinBERT)
+per transcript section, and models the relationship between earnings-call
+language and subsequent **post-earnings drift** using LightGBM + SHAP,
+finishing with a cost-aware long/short event backtest.
 
 ## Pipeline Overview
 
 ```
-┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  01_pull_prices     │────▶│  02_transcripts     │────▶│  03_sentiment     │────▶│  04_modeling      │
-│                     │     │                     │     │                   │     │                   │
-│  • yfinance prices  │     │  • SEC EDGAR 8-K    │     │  • VADER sentiment│     │  • LightGBM model │
-│  • Earnings dates   │     │    exhibit scraping │     │  • LM dictionary  │     │  • Time-series CV │
-│  • VIX pull         │     │  • Fiscal calendar  │     │  • FinBERT (GPU)  │     │  • SHAP analysis  │
-│  • XLK-adj returns  │     │    mapping          │     │  • Readability    │     │  • Predictions    │
-│                     │     │                     │     │  • Join w/returns │     │                   │
-└─────────┬───────────┘     └─────────┬───────────┘     └────────┬──────────┘     └──────────────────┘
-          │                           │                          │
-          ▼                           ▼                          ▼
-┌────────────────────────────────────────────────────────────────────────────────┐
-│                              data/market.db (SQLite)                            │
-│  tables: prices | earnings | returns | transcripts | sentiment_features         │
-│          model_predictions                                                      │
-└────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│  01_pull_prices     │────▶│  02_transcripts     │────▶│  03_sentiment     │────▶│  04_modeling      │────▶│  05_backtest      │
+│                     │     │                     │     │                   │     │                   │     │                   │
+│  • yfinance prices  │     │  • SEC EDGAR 8-K    │     │  • VADER sentiment│     │  • LightGBM model │     │  • Long/short     │
+│  • Earnings dates   │     │    exhibit scraping │     │  • LM dictionary  │     │  • Optuna tuning  │     │    strategy       │
+│  • VIX pull         │     │  • Fiscal calendar  │     │  • FinBERT (GPU)  │     │  • Time-series CV │     │  • Sharpe / DD    │
+│  • SPY-adj returns  │     │    mapping          │     │  • Readability    │     │  • SHAP analysis  │     │  • Sensitivity    │
+│                     │     │                     │     │  • Join w/returns │     │  • Sector models  │     │                   │
+└─────────┬───────────┘     └─────────┬───────────┘     └────────┬──────────┘     └─────────┬────────┘     └──────────────────┘
+          │                           │                          │                          │
+          ▼                           ▼                          ▼                          ▼
+┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    data/market.db (SQLite)                                         │
+│  tables: prices | earnings | returns | transcripts | sentiment_features | model_predictions        │
+└───────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> Transcripts come primarily from **02b** (HuggingFace, ~685 companies); **02** is the
+> legacy SEC EDGAR scraper shown in the diagram. `run_pipeline.py` executes
+> `01 → 03 → 04 → 05` (02b is a one-time ingest — run it with `--ingest`). Tables not
+> drawn above: `transcripts_text` (compressed transcript store) and `vix`.
 
 ## Notebooks
 
 | # | Notebook | Purpose | Key Output |
 |---|----------|---------|------------|
-| 01 | `01_pull_prices.ipynb` | Pull prices for 14 tech tickers + SPY/XLK, fetch earnings dates, compute XLK-adjusted abnormal returns, pull VIX | `prices`, `earnings`, `returns` tables in SQLite |
-| 02 | `02_transcripts.ipynb` | Scrape earnings call transcripts from SEC EDGAR 8-K filings using the `edgartools` library | `transcripts` table + `.txt` files in `data/transcripts/` |
-| 03 | `03_sentiment.ipynb` | Compute VADER, Loughran-McDonald, FinBERT sentiment + readability metrics; join with returns | `sentiment_features` table in SQLite |
-| 04 | `04_modeling.ipynb` | Train LightGBM model predicting abnormal 30d returns; SHAP explainability; persist model | `model_predictions` table + `models/lgbm_abnormal_30d.pkl` |
+| 01 | `01_pull_prices.ipynb` | Pull prices for the full universe (58 core + every ticker with an HF transcript, ~685) + SPY/XLK/IWM, fetch earnings dates, compute SPY-adjusted abnormal returns, pull VIX | `prices`, `earnings`, `returns`, `vix` tables in SQLite |
+| 02 | `02_transcripts.ipynb` | (Legacy) Scrape SEC EDGAR 8-K exhibits (press releases) using `edgartools` | `transcripts` table + `.txt` files in `data/transcripts/` |
+| 02b | `02b_ingest_hf_transcripts.ipynb` | **Primary transcript source**: ingest 33k+ real earnings-call transcripts (685 companies, 2005–2025, speaker-segmented) from HuggingFace `kurry/sp500_earnings_transcripts`; split prepared remarks vs Q&A by speaker turns; compute evasiveness stats; store zlib-compressed | `transcripts_text` table in SQLite |
+| 03 | `03_sentiment.ipynb` | Compute VADER, Loughran-McDonald, FinBERT sentiment + readability metrics per transcript section (full / prepared remarks / Q&A); join with returns | `sentiment_features` table in SQLite |
+| 04 | `04_modeling.ipynb` | Train Optuna-tuned LightGBM regression + classification predicting **30-day post-earnings drift** (`abnormal_30d`); leak-free expanding features; honest tune/eval split; SHAP; sector sub-models | `model_predictions` table + `models/lgbm_abnormal_30d.pkl` |
+| 05 | `05_backtest.ipynb` | Backtest a long/short strategy on model predictions (top/bottom 20% by predicted return); **transaction costs**, holding-period-aware Sharpe, drawdown, cutoff sensitivity | Performance metrics + equity curves |
 
 ## Setup
 
@@ -46,13 +54,50 @@ source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
 ```
 
+## Running the pipeline
+
+One command runs the notebooks in dependency order (`01 → 03 → 04 → 05`),
+executing each in place so its outputs (tables, charts) are saved into the
+notebook:
+
+```bash
+python run_pipeline.py            # full pipeline
+python run_pipeline.py --dry-run  # preview the plan, run nothing
+python run_pipeline.py --from 03  # skip the slow price pull (data already loaded)
+python run_pipeline.py --only 04 05
+```
+
+On Windows, `.\run.ps1 <args>` wraps the venv Python so you don't type the
+full path. Notebook `02b` (the one-time HuggingFace transcript ingest) is
+skipped by default — pass `--ingest` to include it. First run must include
+`01` to populate prices for the full universe; after that, `--from 03` is the
+fast path for model iteration.
+
+After a run, get a quick verdict on whether there's signal:
+
+```bash
+python scripts/analyze_results.py   # IC + t-stat, decile spread, sign accuracy, AUC
+```
+
+During a long 03 run, a second terminal can watch FinBERT progress live
+(the notebook's own prints are buffered until the stage finishes):
+
+```bash
+python scripts/monitor_progress.py  # progress bar + rate + ETA; Ctrl+C safe
+```
+
+> **Note on evaluation:** the reported metrics come from an untouched holdout
+> (the last 30% of events by date). Optuna tuning and feature selection only
+> ever see the first 70%, so the numbers are an honest out-of-sample read, not
+> an in-sample fit.
+
 ## Data Flow
 
 ### 01 → SQLite tables: `prices`, `earnings`, `returns`
 
-- Downloads daily OHLCV for 14 tech stocks + SPY + XLK (2019–present) via `yfinance`
+- Downloads daily OHLCV for the full universe (58 core names + every ticker with an ingested HF transcript, ~685) + SPY + XLK + IWM (2016-07 to present) via `yfinance`
 - Fetches historical earnings dates and EPS surprises
-- Computes **XLK-adjusted abnormal returns** (raw return minus tech-sector benchmark) at 1d/30d/90d horizons
+- Computes **SPY-adjusted abnormal returns** (raw return minus market benchmark) at 1d/30d/90d horizons
 - Pulls VIX close as a market-regime feature
 - Flags COVID-era observations (2020-02-20 to 2021-06-30)
 
@@ -65,28 +110,39 @@ pip install -r requirements.txt
 
 ### 03 → SQLite table: `sentiment_features`
 
-- **VADER**: Compound sentiment + pos/neg/neu breakdown
+- **VADER**: Chunk-level compound sentiment + distribution stats (mean/std/percentiles)
 - **Loughran-McDonald**: Financial-domain dictionary counts (positive, negative, uncertainty, litigious, constraining, modal)
 - **FinBERT**: Transformer-based financial sentiment via `ProsusAI/finbert` (accelerated on AMD GPU via DirectML)
 - **Readability**: Flesch-Kincaid, Gunning Fog, SMOG, Dale-Chall, automated readability, unique word ratio, avg sentence length
+- Features computed **per section**: `full_*`, `prepared_remarks_*`, `qa_*` (Q&A is where unscripted sentiment leaks)
 - Joins to returns data by matching transcript pub_date to nearest earnings_date (≤30 day diff)
 
 ### 04 → SQLite table: `model_predictions` + `models/`
 
-- **Target**: `abnormal_30d` (XLK-adjusted 30-trading-day return)
-- **Features**: All sentiment, readability, and market-regime features + ticker (categorical)
-- **Model**: LightGBM regressor with time-series cross-validation (5-fold `TimeSeriesSplit`)
-- **Explainability**: SHAP summary, dependence, and bar plots
-- **Output**: Pickled model + predictions with per-feature SHAP values
+- **Target**: `abnormal_30d` (SPY-adjusted return over the 30 trading days *after* earnings — the post-earnings-announcement-drift horizon, where signal diffuses slowly, rather than the near-instantly arbitraged 1-day pop). Set `TARGET` in the imports cell to `abnormal_1d` for the hard baseline.
+- **Features**: Mutual-information-selected sentiment, readability, momentum, EPS-surprise, and market-regime features + ticker/sector (categorical). All panel features are **point-in-time correct** (`src/features.py`): expanding within-ticker z-scores, quarter-over-quarter deltas, and PEAD priors use only strictly-prior observations — no look-ahead.
+- **Honest evaluation**: Optuna tunes on the first 70% of events (by date); performance is reported on the untouched last 30% via expanding walk-forward. Feature selection and tuning never see the eval region.
+- **Model**: Optuna-tuned LightGBM regressor and classifier, plus per-sector sub-models under the same protocol.
+- **Explainability**: SHAP summary, dependence, and bar plots.
+- **Output**: Pickled model + predictions with per-feature SHAP values. Run `scripts/analyze_results.py` afterwards for a one-line verdict (information coefficient + t-stat, decile spread, AUC).
+
+### 05 → Backtest
+
+- Ranks stocks by predicted abnormal return per earnings date
+- Long top 20% / short bottom 20%, equal-weight legs, holding period = target horizon
+- **Transaction costs** (round-trip spread/slippage + short-leg borrow), reported gross vs. net
+- Sharpe annualized by √(252 / holding days), max drawdown, win rate, leg decomposition, cutoff sensitivity
+- Benchmarks: equal-weight portfolio, SPY over the same window, long-only variant
 
 ## Tech Stack
 
 - **Data**: `yfinance`, `edgartools`, `beautifulsoup4`
 - **NLP**: `nltk` (VADER), `pysentiment2` (LM dictionary), `transformers` (FinBERT)
 - **GPU**: `torch-directml` for AMD GPU acceleration
-- **Modeling**: `lightgbm`, `scikit-learn`, `shap`
+- **Modeling**: `lightgbm`, `scikit-learn`, `shap`, `optuna`
 - **Viz**: `matplotlib`, `seaborn`, `plotly`
 - **Storage**: SQLite (`sqlite3`), `joblib` for model serialization
+- **Testing**: `pytest` (unit tests for `src/` in `tests/`)
 
 ## Project Structure
 
@@ -94,44 +150,67 @@ pip install -r requirements.txt
 ECA/
 ├── notebooks/
 │   ├── 01_pull_prices.ipynb
-│   ├── 02_transcripts.ipynb
+│   ├── 02_transcripts.ipynb          (legacy EDGAR scraper)
+│   ├── 02b_ingest_hf_transcripts.ipynb
 │   ├── 03_sentiment.ipynb
-│   └── 04_modeling.ipynb
+│   ├── 04_modeling.ipynb
+│   └── 05_backtest.ipynb
 ├── src/
-│   └── .gitkeep
+│   ├── config.py                 (shared tickers/benchmarks/dates/paths)
+│   ├── sentiment.py              (cleaning, chunking, VADER/LM/readability)
+│   ├── transcripts_io.py         (speaker sectioning, evasiveness stats, compressed storage)
+│   ├── returns_calc.py           (vectorized forward/trailing return engine)
+│   ├── features.py               (leak-free expanding z-scores, QoQ deltas, PEAD priors, FinBERT combine)
+│   ├── features_parallel.py      (multiprocess VADER/LM/readability for 33k transcripts)
+│   └── join.py                   (transcript-to-returns matching)
+├── scripts/
+│   ├── analyze_results.py        (post-run model verdict: IC, decile spread, AUC)
+│   ├── monitor_progress.py       (live FinBERT progress bar for long 03 runs)
+│   ├── run_llm_extraction.py     (LLM Q&A feature extraction; checkpointed + resumable)
+│   └── snapshot_daily.py         (daily analyst-estimate/short-interest recorder)
+├── run_pipeline.py               (runs 01→03→04→05 in order via the venv kernel)
+├── run.ps1                       (Windows wrapper for run_pipeline.py)
+├── tests/                        (gitignored; pytest unit tests, 130+)
+├── docs/                         (gitignored; project journal, LLM extraction plan)
+├── graphs/
+│   └── legacy/                   (gitignored; pre-rebuild charts — current charts live in the notebooks)
 ├── data/                         (gitignored)
 │   ├── market.db                 (SQLite database)
-│   └── transcripts/              (scraped .txt files)
-│       ├── MSFT/
-│       ├── GOOGL/
-│       └── ...
+│   └── transcripts/              (legacy EDGAR .txt files; primary store is the transcripts_text DB table)
 ├── models/                       (gitignored)
 │   └── lgbm_abnormal_30d.pkl
-├── docs/                         (gitignored)
 ├── requirements.txt
+├── .env.example                  (template — copy to .env for LLM extraction keys)
+├── .env                          (gitignored; your API keys)
 ├── .gitignore
 └── README.md
 ```
 
 ## Ticker Universe
 
-14 large-cap US tech companies with sector benchmark adjustment:
+**Core universe**: 58 curated large-cap US companies across 11 sectors (below).
+**Extended universe**: after running `02b_ingest_hf_transcripts.ipynb`, notebook 01
+automatically extends to every ticker with an ingested transcript (~685 names) via
+`src.config.get_full_universe()`.
 
-| Ticker | Company | Fiscal Year End |
-|--------|---------|----------------|
-| MSFT | Microsoft | Jun 30 |
-| GOOGL | Alphabet | Dec 31 |
-| META | Meta | Dec 31 |
-| AMZN | Amazon | Dec 31 |
-| NVDA | NVIDIA | Last Sun of Jan |
-| AMD | AMD | Dec 31 |
-| INTC | Intel | Dec 31 |
-| CRM | Salesforce | Jan 31 |
-| ORCL | Oracle | May 31 |
-| ADBE | Adobe | Last Fri of Nov |
-| CSCO | Cisco | Last Sat of Jul |
-| IBM | IBM | Dec 31 |
-| NOW | ServiceNow | Dec 31 |
-| NFLX | Netflix | Dec 31 |
+| Sector | Tickers |
+|--------|---------|
+| Technology | MSFT, GOOGL, META, AMZN, NVDA, AMD, INTC, CRM, ORCL, ADBE, CSCO, IBM, NOW, NFLX, DOCU, TWLO, PINS, SNAP, NET, DDOG, SQ, ROKU, CRWD, ZM, TEAM |
+| Financials | JPM, BAC, GS, COF |
+| Healthcare | JNJ, UNH, PFE, ABT |
+| Consumer Cyclical | HD, SBUX, NKE, UBER, DASH, DIS |
+| Consumer Defensive | WMT, COST, PG, KO |
+| Industrials | CAT, BA, GE, DE, DAL |
+| Energy | XOM, CVX, DVN |
+| Materials | FCX, NEM |
+| Real Estate | PLD, SPG |
+| Utilities | NEE, DUK |
+| Communication Services | VZ |
 
-**Benchmarks**: SPY (S&P 500), XLK (Technology Select Sector — used for abnormal return adjustment)
+Non-calendar fiscal years (MSFT, NVDA, CRM, ORCL, ADBE, CSCO, CRWD, ZM, TEAM,
+WMT, HD, COST, SBUX, DIS, NKE, PG, DE) matter only for the **legacy**
+`02_transcripts.ipynb` scraper, which maps announcement dates to fiscal quarters.
+The primary `02b` HuggingFace transcripts already carry fiscal year/quarter labels,
+so no mapping is needed.
+
+**Benchmarks**: SPY (S&P 500 — used for abnormal return adjustment), XLK (Technology Select Sector), IWM (Russell 2000)

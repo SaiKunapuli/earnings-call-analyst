@@ -7,7 +7,7 @@ requests==2.31.0
 torch==2.4.1
 transformers==4.40.0
 huggingface_hub[hf_xet]==0.36.2
-torch-directml>=0.2.5
+torch-directml==0.2.5.dev240914
 pysentiment2==0.1.1
 textstat==0.7.3
 scikit-learn==1.4.0
@@ -22,3 +22,8 @@ pytest==9.1.1
 nltk==3.8.1
 shap==0.45.0
 joblib==1.4.2
+optuna==4.9.0
+datasets==5.0.0
+# defeatbeta-api  # optional: free transcript updates for post-2025 quarters (02b).
+#   WARNING: installing it upgrades numpy/pandas past the pins above — afterwards
+#   run: pip install numpy==1.26.4 pandas==2.2.0  (it still works with them)
