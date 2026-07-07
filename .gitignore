@@ -4,7 +4,8 @@ venv/
 
 # Data files (too large for git)
 data/*
-!data/snapshots.db   # daily snapshots -- small, committed for GitHub Actions persistence
+!data/snapshots.db    # daily snapshots -- small, committed for GitHub Actions persistence
+!data/universe.txt    # full snapshot universe -- so CI covers all ~690 names, not just 57
 __pycache__/
 *.pyc
 *.pyo

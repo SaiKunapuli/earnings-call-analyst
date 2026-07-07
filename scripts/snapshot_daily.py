@@ -42,9 +42,37 @@ try:
 except Exception:
     pass
 
-from src.config import DB_PATH, get_full_universe
+from src.config import DB_PATH, TICKERS, get_full_universe
 
 SNAP_DB = PROJECT_ROOT / "data" / "snapshots.db"
+# Committed snapshot of the full universe so GitHub Actions (which has no
+# market.db) can snapshot all ~690 names, not just the 57 curated ones.
+# Refreshed automatically on every LOCAL run (where market.db is present).
+UNIVERSE_FILE = PROJECT_ROOT / "data" / "universe.txt"
+
+
+def resolve_universe(db_path, tickers_arg) -> list[str]:
+    """Full tradeable universe for the snapshot.
+
+    Precedence: explicit --tickers > market.db (local) > committed
+    universe.txt (CI) > curated TICKERS. When market.db is present the file is
+    rewritten so the committed list stays current for CI runs.
+    """
+    if tickers_arg:
+        return [t.upper() for t in tickers_arg]
+    full = get_full_universe(db_path)          # 690 locally; falls back to TICKERS in CI
+    if len(full) > len(TICKERS) + 5:           # market.db present with HF universe
+        try:
+            UNIVERSE_FILE.write_text("\n".join(full) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return full
+    if UNIVERSE_FILE.exists():                  # CI: read the committed list
+        names = [ln.strip() for ln in
+                 UNIVERSE_FILE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if names:
+            return names
+    return sorted(TICKERS)
 
 INFO_FIELDS = {                     # info key -> column
     "targetMeanPrice": "target_mean", "targetHighPrice": "target_high",
@@ -131,7 +159,7 @@ def main() -> int:
     Path(args.db).parent.mkdir(parents=True, exist_ok=True)
 
     snap_date = dt.date.today().isoformat()
-    universe = args.tickers or get_full_universe(DB_PATH)
+    universe = resolve_universe(DB_PATH, args.tickers)
     conn = sqlite3.connect(args.db)
     ensure_tables(conn)
     done = snapped_today(conn, snap_date)

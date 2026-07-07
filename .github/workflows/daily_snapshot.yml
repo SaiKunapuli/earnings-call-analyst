@@ -10,7 +10,7 @@ on:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25  # full ~690-ticker universe (via data/universe.txt) at 0.5s delay
     permissions:
       contents: write  # needed to push the DB commit
 

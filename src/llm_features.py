@@ -221,17 +221,26 @@ class GeminiProvider(LLMProvider):
 
 
 class OllamaProvider(LLMProvider):
-    """Local Ollama server — fully free, no key. `ollama pull llama3.1:8b`."""
+    """Local Ollama server — fully free, no key.
+
+    num_ctx matters: Ollama's default context (~4k tokens) silently TRUNCATES
+    our ~7k-token prompts, cutting off the instructions. 12k covers the
+    5,000-word Q&A cap plus schema and output with headroom.
+    """
     name = "ollama"
 
-    def __init__(self, model: str = "llama3.1:8b",
-                 base_url: str = "http://localhost:11434"):
+    def __init__(self, model: str = "qwen2.5:14b-instruct",
+                 base_url: str = "http://localhost:11434",
+                 num_ctx: int = 12288):
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.num_ctx = num_ctx
 
     def complete(self, prompt: str) -> str:
         payload = {"model": self.model, "prompt": prompt, "stream": False,
-                   "format": "json", "options": {"temperature": 0.0}}
+                   "format": "json",
+                   "options": {"temperature": 0.0, "num_ctx": self.num_ctx},
+                   "keep_alive": "30m"}   # keep the model warm between calls
         data = _post_json(f"{self.base_url}/api/generate", payload,
                           headers={}, timeout=600)
         return data.get("response", "")
@@ -261,9 +270,11 @@ class AnthropicProvider(LLMProvider):
 
 
 def get_provider(name: str | None = None, model: str | None = None) -> LLMProvider:
-    """Explicit name, or auto-detect from configured keys (then local Ollama)."""
+    """Explicit name > LLM_PROVIDER in .env > auto-detect from configured
+    keys (Anthropic > Gemini) > local Ollama."""
     load_env()
     kwargs = {"model": model} if model else {}
+    name = name or os.environ.get("LLM_PROVIDER", "").strip().lower() or None
     if name:
         return {"gemini": GeminiProvider, "ollama": OllamaProvider,
                 "anthropic": AnthropicProvider}[name](**kwargs)

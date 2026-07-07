@@ -16,13 +16,19 @@ Usage (from the repo root, with the project venv):
     # the pilot from docs/llm_qa_plan.md: ~65 complete tickers
     .venv/Scripts/python.exe scripts/run_llm_extraction.py --pilot 65
 
+    # billed Gemini, paid-tier concurrency (fast); --dry-run first to see cost
+    .venv/Scripts/python.exe scripts/run_llm_extraction.py --paid --pilot 65
+    .venv/Scripts/python.exe scripts/run_llm_extraction.py --paid   # full corpus
+
 Provider selection (see src/llm_features.py): --provider gemini|ollama|anthropic,
-or auto-detect from .env keys; falls back to local Ollama.
+or auto-detect from .env keys; falls back to local Ollama. `--dry-run` prices
+the run (needs no key). `--paid` uses paid-tier rpm/worker defaults.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import threading
@@ -39,13 +45,56 @@ except Exception:
     pass
 
 from src.config import DB_PATH
-from src.llm_features import LLMExtractionError, get_provider, score_qa
+from src.llm_features import LLMExtractionError, get_provider, load_env, score_qa
 from src.sentiment import SECTOR_MAP, clean_transcript
 from src.transcripts_io import fetch_sections
 
 MIN_PUB_DATE = "2016-07-01"     # must match notebook 03's corpus filter
 MIN_QA_WORDS = 200              # skip stub Q&A sections
-DEFAULT_RPM = {"gemini": 12}    # free tier: ~15 RPM on 2.5-flash-lite; stay under
+
+# Requests/minute ceiling per provider. Free Gemini caps hard (~15 RPM on
+# 2.5-flash-lite, ~a few hundred/day); paid Tier-1 flash-lite allows thousands.
+FREE_RPM = {"gemini": 12}
+PAID_RPM = {"gemini": 1500}     # anything not listed -> 0 (unlimited / tier-bound)
+
+# Pre-flight cost estimate ($ per 1M tokens, PAID tiers). Recalled figures —
+# verify against the provider's current pricing page before a large run.
+PRICING = {
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-flash":      (0.30, 2.50),
+    "claude-haiku-4-5":      (1.00, 5.00),
+    "claude-sonnet-5":       (3.00, 15.00),
+    "claude-opus-4-8":       (5.00, 25.00),
+}
+AVG_INPUT_TOKENS = 7000    # ~5,000-word Q&A cap + prompt/schema (measured shape)
+AVG_OUTPUT_TOKENS = 150
+
+# Default model per provider (mirrors src.llm_features) — used to price the run
+# in --dry-run WITHOUT constructing a provider (which would need a key).
+DEFAULT_MODEL = {"gemini": "gemini-2.5-flash-lite",
+                 "anthropic": "claude-haiku-4-5",
+                 "ollama": "qwen2.5:14b-instruct"}
+
+
+def estimate_cost(model: str, n: int) -> float | None:
+    price = PRICING.get(model)
+    if not price:
+        return None
+    inp, out = price
+    return n * (AVG_INPUT_TOKENS * inp + AVG_OUTPUT_TOKENS * out) / 1e6
+
+
+def detect_provider() -> str:
+    """Same precedence as src.llm_features.get_provider, without a network call."""
+    load_env()
+    name = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if name:
+        return name
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini"
+    return "ollama"
 
 
 class RateLimiter:
@@ -123,11 +172,13 @@ def main() -> int:
     ap.add_argument("--tickers", nargs="+", help="restrict to these tickers")
     ap.add_argument("--pilot", type=int, metavar="N",
                     help="restrict to ~N complete tickers, sector-stratified (seed 42)")
-    ap.add_argument("--workers", type=int, default=4,
-                    help="parallel API calls (use 1 for Ollama)")
+    ap.add_argument("--workers", type=int,
+                    help="parallel API calls (default: 4 free / 24 paid / 1 ollama)")
     ap.add_argument("--rpm", type=float,
                     help="max requests/minute across all workers "
-                         "(default: 10 for gemini free tier, unlimited otherwise)")
+                         "(default: 12 gemini-free / 1500 gemini-paid / unlimited)")
+    ap.add_argument("--paid", action="store_true",
+                    help="paid-tier concurrency defaults (higher rpm + workers)")
     ap.add_argument("--flush-every", type=int, default=50)
     ap.add_argument("--db", default=str(DB_PATH))
     ap.add_argument("--dry-run", action="store_true",
@@ -149,23 +200,37 @@ def main() -> int:
     if args.limit:
         todo = todo[:args.limit]
 
+    # --- Cost pre-flight (works before any key is set, e.g. under --dry-run) ---
+    prov_name = args.provider or detect_provider()
+    model_name = args.model or DEFAULT_MODEL.get(prov_name, "")
+    cost = estimate_cost(model_name, len(todo))
+    cost_str = (f"~${cost:,.2f}" if cost is not None
+                else "n/a (free/local or unpriced model)")
     print(f"corpus: {len(keys):,} Q&A transcripts | already scored: "
           f"{len(done & set(keys)):,} | to do: {len(todo):,}")
+    print(f"est. cost: {cost_str}  ({prov_name}/{model_name or '?'}, "
+          f"~{AVG_INPUT_TOKENS:,} in + {AVG_OUTPUT_TOKENS} out tok/tx)")
     if args.dry_run or not todo:
         conn.close()
         print("dry run — nothing scored." if args.dry_run else "nothing to do.")
         return 0
 
+    # Resolve concurrency: explicit flags win; else free vs paid defaults.
+    workers = args.workers if args.workers is not None else (
+        1 if prov_name == "ollama" else 24 if args.paid else 4)
+    rpm_table = PAID_RPM if args.paid else FREE_RPM
+    rpm = args.rpm if args.rpm is not None else rpm_table.get(prov_name, 0)
+
     provider = get_provider(args.provider, args.model)
-    rpm = args.rpm if args.rpm is not None else DEFAULT_RPM.get(provider.name, 0)
     limiter = RateLimiter(rpm)
     _orig_complete = provider.complete
     def _throttled(prompt):          # every API call (incl. retries) waits its turn
         limiter.wait()
         return _orig_complete(prompt)
     provider.complete = _throttled
-    print(f"provider: {provider.name} ({provider.model}) | workers: {args.workers} "
-          f"| flush every {args.flush_every} | rpm: {rpm or 'unlimited'}")
+    print(f"provider: {provider.name} ({provider.model}) | workers: {workers} "
+          f"| flush every {args.flush_every} | rpm: {rpm or 'unlimited'} "
+          f"| tier: {'paid' if args.paid else 'free'}")
 
     # Main thread owns SQLite (reads + writes); workers only make API calls.
     def fetch_qa(key):
@@ -186,9 +251,9 @@ def main() -> int:
             conn.commit()
             buffer = []
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         # submit in chunks so texts (fetched in main thread) don't pile up in RAM
-        CHUNK = max(args.workers * 8, 32)
+        CHUNK = max(workers * 8, 32)
         for c0 in range(0, len(todo), CHUNK):
             chunk = todo[c0:c0 + CHUNK]
             futures = {}
