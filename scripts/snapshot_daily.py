@@ -127,6 +127,9 @@ def main() -> int:
 
     import yfinance as yf
 
+    # Ensure data/ directory exists (needed in CI where data/ is gitignored)
+    Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+
     snap_date = dt.date.today().isoformat()
     universe = args.tickers or get_full_universe(DB_PATH)
     conn = sqlite3.connect(args.db)

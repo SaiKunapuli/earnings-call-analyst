@@ -1,0 +1,43 @@
+name: Daily Analyst Estimate Snapshot
+
+on:
+  schedule:
+    # Runs weekdays at 12:00 UTC (7am ET, 4am PT).
+    # Market data is updated overnight; noon UTC ensures it's available.
+    - cron: "0 12 * * 1-5"
+  workflow_dispatch:  # allow manual trigger for testing
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # needed to push the DB commit
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance pandas
+
+      - name: Run snapshot
+        run: python scripts/snapshot_daily.py --delay 0.5
+
+      - name: Commit updated snapshot DB
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/snapshots.db
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "snapshot: $(date +%Y-%m-%d)"
+            git push
+          fi

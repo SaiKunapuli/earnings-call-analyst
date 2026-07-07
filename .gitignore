@@ -19,6 +19,7 @@ __pycache__/
 # Databases
 *.sqlite
 *.db
+!data/snapshots.db   # daily snapshots — small, committed for GitHub Actions persistence
 
 # IDE / tooling
 .qodo/
