@@ -31,11 +31,11 @@ smoke_test_*.py
 stress_test_*.py
 db_state.py
 
-# Docs (un-hid 2026-07-08 for portfolio — PROJECT_JOURNAL, trading_bot_layers, etc.)
-# docs/
+# Docs (gitignored per user request)
+docs/
 
-# Tests (un-hid 2026-07-08 for portfolio — 132 passing pytest tests)
-# tests/
+# Tests (gitignored per user request)
+tests/
 
 # scripts/ is tracked (pipeline utilities: analyze_results, monitor_progress,
 # run_llm_extraction). One-off throwaway scripts match the patterns above
