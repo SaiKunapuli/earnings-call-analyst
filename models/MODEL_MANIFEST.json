@@ -1,0 +1,27 @@
+{
+  "lgbm_abnormal_1d.pkl": {
+    "sha256": "96cbfacba9635311a33a894522f321bc0cd7d1294d80401184d7f283a70875ff",
+    "bytes": 177076,
+    "description": "(undocumented artifact)"
+  },
+  "lgbm_abnormal_30d.pkl": {
+    "sha256": "b8f889ce24d330d8ede0681f19411b9744d76ca97e2778c02ce250d38a1f8cc5",
+    "bytes": 421192,
+    "description": "CANONICAL. Clean frozen-cutoff retrain (<=2025-05-15, 23 base + 14 llm features). Owns the honest OOS numbers (journal \u00a74.13)."
+  },
+  "lgbm_abnormal_30d_CONTAMINATED_trained_thru_202605.pkl": {
+    "sha256": "4c414fef90ca7c9ad42add2b90a27eb2d40f9bd962fca14f0cc4b84bae25eb1b",
+    "bytes": 430368,
+    "description": "RECIPE SOURCE ONLY \u2014 trained through 2026-05 (journal \u00a74.11). Params/feature list safe (from pre-2023-08 tune split); weights are NOT. Never predict with it."
+  },
+  "lgbm_abnormal_30d_frozen20250515_llm_v2.pkl": {
+    "sha256": "b8f889ce24d330d8ede0681f19411b9744d76ca97e2778c02ce250d38a1f8cc5",
+    "bytes": 421192,
+    "description": "Immutable archive of the canonical clean retrain (identical bytes at creation)."
+  },
+  "lgbm_abnormal_30d_va.pkl": {
+    "sha256": "32107493a3abefe1cd2053f16ffb1473c5acf57a6f763cb8b85ad641c45d1932",
+    "bytes": 414170,
+    "description": "(undocumented artifact)"
+  }
+}

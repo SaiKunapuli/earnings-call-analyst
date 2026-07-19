@@ -23,6 +23,7 @@ Output:
 from __future__ import annotations
 
 import sqlite3
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -76,7 +77,11 @@ def _load_vix(db_path: str | Path = DB_PATH) -> pd.Series:
             "SELECT date, vix_close AS close FROM vix ORDER BY date",
             conn, parse_dates=["date"], index_col="date",
         )
-    except (sqlite3.OperationalError, pd.io.sql.DatabaseError):
+    except (sqlite3.OperationalError, pd.io.sql.DatabaseError) as e:
+        # LOUD degradation: a silent fallback here once ran the gate on 3 of 4
+        # inputs for days with nobody noticing (journal §4.14).
+        warnings.warn(f"regime gate: VIX input unavailable ({e}) — "
+                      "gate will run WITHOUT the VIX signal", stacklevel=2)
         vix = pd.DataFrame(columns=["close"])
     conn.close()
     return vix["close"].rename("vix").dropna() if not vix.empty else pd.Series(dtype=float)
@@ -98,8 +103,11 @@ def _load_credit(
         closes = raw.get("Close", raw)
         if isinstance(closes, pd.DataFrame) and len(closes.columns) >= 2:
             return closes
-    except Exception:
-        pass
+        warnings.warn("regime gate: HYG/LQD download returned no usable columns "
+                      "— gate will run WITHOUT the credit signal", stacklevel=2)
+    except Exception as e:
+        warnings.warn(f"regime gate: HYG/LQD download failed ({e}) — "
+                      "gate will run WITHOUT the credit signal", stacklevel=2)
     return pd.DataFrame()  # empty — credit signal will be neutral
 
 

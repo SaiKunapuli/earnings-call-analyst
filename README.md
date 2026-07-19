@@ -1,11 +1,39 @@
 # Earnings Call Analyst
 
-A quantitative pipeline that ingests 33k+ real earnings-call transcripts
-(HuggingFace, speaker-segmented; SEC EDGAR 8-K scraping kept as a legacy
-fallback), computes NLP sentiment scores (VADER, Loughran-McDonald, FinBERT)
-per transcript section, and models the relationship between earnings-call
-language and subsequent **post-earnings drift** using LightGBM + SHAP,
-finishing with a cost-aware long/short event backtest.
+A quantitative pipeline that ingests 39k+ real earnings-call transcripts
+(HuggingFace + defeatbeta-api, speaker-segmented; SEC EDGAR 8-K scraping kept
+as a legacy fallback), computes NLP sentiment scores (VADER, Loughran-McDonald,
+FinBERT) and LLM-extracted Q&A features per transcript section, and models the
+relationship between earnings-call language and subsequent **post-earnings
+drift** using LightGBM + SHAP, finishing with a cost-aware long/short event
+backtest and a pre-registered frozen-cutoff out-of-sample test.
+
+## The honest headline (read this before the metrics)
+
+This is a research/portfolio project, and its most valuable result is a
+**negative one, found by the project's own evaluation discipline**:
+
+- The signal is *real*: in-sample rank IC +0.066 (t=2.34) on a 31-month
+  untouched eval region, confirmed by a frozen-cutoff out-of-sample test on
+  2,374 genuinely unseen calls (monthly IC +0.0695 — the in-sample level
+  generalizes with no inflation).
+- The signal is *untradeable as constructed*: the entire edge lives inside the
+  overnight **announcement gap** (calls happen after the close — you cannot own
+  that return). Re-anchoring entry to the next tradable close (T+1) flips the
+  model's IC to **−0.065 (t=−2.26)**, and a *free* ranking by raw EPS surprise
+  beats it (+0.089, t=+3.56).
+- LLM-extracted Q&A features (gemini-2.5-flash-lite, 8 ordinal fields) add a
+  real lift in a paired A/B (+0.038 IC, t=+3.80), which **deflates to +0.018**
+  when measured only in months past the LLM's knowledge cutoff — an
+  LLM-memorization control most published backtests skip.
+- An earlier, spectacular OOS result (IC 0.33) was traced to a silently
+  overwritten "frozen" model file and voided. The forensic method (uniform
+  pre/post-cutoff fit as the contamination fingerprint) is now automated in
+  `scripts/verify_frozen.py`, and every model artifact is hash-pinned in
+  `models/MODEL_MANIFEST.json`.
+
+The full experiment log — every number, dead end, and lesson — lives in
+`docs/PROJECT_JOURNAL.md`; a working-paper write-up is in progress from it.
 
 ## Pipeline Overview
 
@@ -86,10 +114,14 @@ During a long 03 run, a second terminal can watch FinBERT progress live
 python scripts/monitor_progress.py  # progress bar + rate + ETA; Ctrl+C safe
 ```
 
-> **Note on evaluation:** the reported metrics come from an untouched holdout
-> (the last 30% of events by date). Optuna tuning and feature selection only
-> ever see the first 70%, so the numbers are an honest out-of-sample read, not
-> an in-sample fit.
+> **Note on evaluation:** tuning and feature selection only ever see the first
+> 70% of events by date; reported metrics come from the last 30% via expanding
+> walk-forward. Beyond that, a frozen-cutoff protocol governs true OOS claims:
+> the cutoff model is hash-pinned (`models/MODEL_MANIFEST.json`), retrains go
+> through `scripts/retrain_model.py` (never by re-running 04 casually — it has
+> a freeze guard), and `scripts/run_oos_test.py` stamps its output with the
+> model hash. `scripts/verify_frozen.py` audits all of it. The 2025-05→2026-05
+> OOS window has been used once and is declared spent.
 
 ## Data Flow
 
@@ -161,24 +193,37 @@ ECA/
 │   ├── transcripts_io.py         (speaker sectioning, evasiveness stats, compressed storage)
 │   ├── returns_calc.py           (vectorized forward/trailing return engine)
 │   ├── features.py               (leak-free expanding z-scores, QoQ deltas, PEAD priors, FinBERT combine)
-│   ├── features_parallel.py      (multiprocess VADER/LM/readability for 33k transcripts)
-│   └── join.py                   (transcript-to-returns matching)
+│   ├── features_parallel.py      (multiprocess VADER/LM/readability for 39k transcripts)
+│   ├── join.py                   (transcript-to-returns matching)
+│   ├── llm_features.py           (LLM Q&A extraction: prompt, validation, providers)
+│   ├── momentum.py               (Layer 2: price-momentum signal panel)
+│   ├── regime.py                 (Layer 7: rules-based risk-on/off exposure gate)
+│   ├── ensemble.py               (Layer 9: momentum+ECA score combination w/ event decay)
+│   ├── sizing.py                 (Layer 10: vol-balanced decile book construction)
+│   └── credibility.py            (research: management words-vs-outcomes track record)
 ├── scripts/
 │   ├── analyze_results.py        (post-run model verdict: IC, decile spread, AUC)
 │   ├── monitor_progress.py       (live FinBERT progress bar for long 03 runs)
 │   ├── run_llm_extraction.py     (LLM Q&A feature extraction; checkpointed + resumable)
+│   ├── llm_ab_test.py            (read-only A/B: do LLM features add IC? + memorization split)
+│   ├── llm_mask_check.py         (name-masked re-scoring: is the LLM reading or remembering?)
+│   ├── retrain_model.py          (cutoff-safe retrain — the ONLY sanctioned way to retrain)
+│   ├── run_oos_test.py           (frozen-cutoff OOS test; output stamped with model hash)
+│   ├── verify_frozen.py          (artifact hash audit + contamination fingerprint check)
+│   ├── update_transcripts.py     (incremental defeatbeta transcript ingest)
 │   └── snapshot_daily.py         (daily analyst-estimate/short-interest recorder)
 ├── run_pipeline.py               (runs 01→03→04→05 in order via the venv kernel)
 ├── run.ps1                       (Windows wrapper for run_pipeline.py)
-├── tests/                        (gitignored; pytest unit tests, 130+)
-├── docs/                         (gitignored; project journal, LLM extraction plan)
+├── tests/                        (pytest unit tests, 160+)
+├── docs/                         (gitignored; project journal, paper outline, LLM plan)
 ├── graphs/
 │   └── legacy/                   (gitignored; pre-rebuild charts — current charts live in the notebooks)
 ├── data/                         (gitignored)
 │   ├── market.db                 (SQLite database)
 │   └── transcripts/              (legacy EDGAR .txt files; primary store is the transcripts_text DB table)
-├── models/                       (gitignored)
-│   └── lgbm_abnormal_30d.pkl
+├── models/                       (tracked + hash-pinned in MODEL_MANIFEST.json)
+│   ├── lgbm_abnormal_30d.pkl     (canonical frozen-cutoff model, 23 base + 14 LLM features)
+│   └── MODEL_MANIFEST.json       (SHA256 per artifact; audited by verify_frozen.py)
 ├── requirements.txt
 ├── .env.example                  (template — copy to .env for LLM extraction keys)
 ├── .env                          (gitignored; your API keys)
